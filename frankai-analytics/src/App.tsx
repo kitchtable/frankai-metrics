@@ -9,7 +9,9 @@ import { DateRangePicker } from '@mui/x-date-pickers-pro';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
 import { enGB } from 'date-fns/locale';
-import { parse as parseDate, isAfter, isBefore, isEqual } from 'date-fns';
+import { parse as parseDate, isAfter, isBefore, isEqual, startOfMonth, endOfMonth, subDays, startOfYear } from 'date-fns';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 
 // Required columns and their types
 const REQUIRED_COLUMNS = [
@@ -272,6 +274,8 @@ function App() {
   const totalErrors = filteredRows.reduce((acc, r) => acc + (r._rowErrors ? r._rowErrors.length : 0), 0);
   const totalWarnings = filteredRows.reduce((acc, r) => acc + (r._rowWarnings ? r._rowWarnings.length : 0), 0);
 
+  const [dataTableOpen, setDataTableOpen] = useState(false); // collapsed by default
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -282,6 +286,7 @@ function App() {
         setRows(rowsWithId);
         setErrors(parseErrors);
         setShowDetails(false); // Reset details toggle on new upload
+        setDataTableOpen(false); // Collapse data table on new upload
       });
     }
   };
@@ -353,6 +358,72 @@ function App() {
     });
   };
 
+  // Helper: Clamp a date to min/max
+  function clampDate(date: Date, min: Date, max: Date) {
+    if (date < min) return min;
+    if (date > max) return max;
+    return date;
+  }
+
+  // Preset definitions
+  const today = new Date();
+  const presets = [
+    {
+      label: 'Last 7 days',
+      getRange: (min: Date, max: Date) => {
+        const end = max;
+        const start = clampDate(subDays(end, 6), min, max);
+        return [start, end];
+      },
+    },
+    {
+      label: 'Last 14 days',
+      getRange: (min: Date, max: Date) => {
+        const end = max;
+        const start = clampDate(subDays(end, 13), min, max);
+        return [start, end];
+      },
+    },
+    {
+      label: 'Last 30 days',
+      getRange: (min: Date, max: Date) => {
+        const end = max;
+        const start = clampDate(subDays(end, 29), min, max);
+        return [start, end];
+      },
+    },
+    {
+      label: 'This Month',
+      getRange: (min: Date, max: Date) => {
+        const start = clampDate(startOfMonth(max), min, max);
+        const end = max;
+        return [start, end];
+      },
+    },
+    {
+      label: 'Last Month',
+      getRange: (min: Date, max: Date) => {
+        const lastMonthEnd = startOfMonth(max);
+        const lastMonthStart = startOfMonth(subDays(lastMonthEnd, 1));
+        const start = clampDate(lastMonthStart, min, max);
+        const end = clampDate(subDays(lastMonthEnd, 1), min, max);
+        return [start, end];
+      },
+    },
+    {
+      label: 'Year to Date',
+      getRange: (min: Date, max: Date) => {
+        const start = clampDate(startOfYear(max), min, max);
+        const end = max;
+        return [start, end];
+      },
+    },
+    {
+      label: 'All Time',
+      getRange: (min: Date, max: Date) => [min, max],
+    },
+  ];
+
   return (
     <Box sx={{ flexGrow: 1, minHeight: '100vh', bgcolor: '#f5f5f5' }}>
       <AppBar position="static">
@@ -399,11 +470,100 @@ function App() {
             />
           </Box>
         </Paper>
+
+        {/* Data Table Preview */}
+        <Paper elevation={1} sx={{ p: 2, mb: 4 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Typography variant="subtitle1" gutterBottom>
+              Data Table Preview
+            </Typography>
+            <Button
+              size="small"
+              startIcon={dataTableOpen ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+              onClick={() => setDataTableOpen((v) => !v)}
+            >
+              {dataTableOpen ? 'Hide' : 'Show'}
+            </Button>
+          </Box>
+          {dataTableOpen && (
+            <>
+              {/* Summary Counts */}
+              {(filteredRows.length > 0) && (
+                <Box sx={{ mb: 2 }}>
+                  <Typography variant="body2">
+                    <b>Records successfully uploaded:</b> {successfulRows.length}
+                  </Typography>
+                  <Typography variant="body2">
+                    <b>Records unsuccessful:</b> {unsuccessfulRows.length}
+                  </Typography>
+                  <Typography variant="body2">
+                    <b>Total errors:</b> {totalErrors}
+                  </Typography>
+                  <Typography variant="body2">
+                    <b>Total warnings:</b> {totalWarnings}
+                  </Typography>
+                  {(totalErrors > 0 || totalWarnings > 0) && (
+                    <Button size="small" sx={{ mt: 1 }} onClick={() => setShowDetails(v => !v)}>
+                      {showDetails ? 'Hide details' : 'Show details'}
+                    </Button>
+                  )}
+                </Box>
+              )}
+              {/* Collapsible Error/Warning List */}
+              {showDetails && errors.length > 0 && (
+                <Box sx={{ mb: 2 }}>
+                  {errors.map((err, idx) => (
+                    <Alert severity={err.includes('warning') ? 'warning' : 'error'} key={idx}>{err}</Alert>
+                  ))}
+                </Box>
+              )}
+              <div style={{ height: 400, width: '100%' }}>
+                <DataGrid
+                  rows={filteredRows}
+                  columns={columns}
+                  pageSizeOptions={[10, 25, 50]}
+                  initialState={{ pagination: { paginationModel: { pageSize: 10 } } }}
+                  getCellClassName={(params: GridCellParams) => {
+                    const row = filteredRows[params.row.id];
+                    if (row && row._rowErrors && row._rowErrors.length > 0) {
+                      return 'error-row';
+                    }
+                    return '';
+                  }}
+                  disableRowSelectionOnClick
+                />
+              </div>
+            </>
+          )}
+        </Paper>
+
         {/* Date Range Picker */}
         <Paper elevation={1} sx={{ p: 2, mb: 4 }}>
           <Typography variant="h6" gutterBottom>
             2. Select Date Range
           </Typography>
+          {/* Date Range Presets (moved inside card) */}
+          {minDate && maxDate && (
+            <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
+              {presets.map((preset) => {
+                const [presetStart, presetEnd] = preset.getRange(minDate, maxDate);
+                // Disable if preset range is outside data
+                const isDisabled = presetStart > maxDate || presetEnd < minDate;
+                return (
+                  <Button
+                    key={preset.label}
+                    variant="outlined"
+                    size="small"
+                    sx={{ borderRadius: 5, textTransform: 'none' }}
+                    disabled={isDisabled}
+                    onClick={() => setDateRange([presetStart, presetEnd])}
+                  >
+                    {preset.label}
+                  </Button>
+                );
+              })}
+            </Box>
+          )}
           <LocalizationProvider dateAdapter={AdapterDateFns} adapterLocale={enGB}>
             <DateRangePicker
               value={dateRange}
@@ -468,58 +628,6 @@ function App() {
               </Box>
             )}
           </FormControl>
-        </Paper>
-        {/* Data Table Preview */}
-        <Paper elevation={1} sx={{ p: 2, mb: 4 }}>
-          <Typography variant="subtitle1" gutterBottom>
-            Data Table Preview
-          </Typography>
-          {/* Summary Counts */}
-          {(filteredRows.length > 0) && (
-            <Box sx={{ mb: 2 }}>
-              <Typography variant="body2">
-                <b>Records successfully uploaded:</b> {successfulRows.length}
-              </Typography>
-              <Typography variant="body2">
-                <b>Records unsuccessful:</b> {unsuccessfulRows.length}
-              </Typography>
-              <Typography variant="body2">
-                <b>Total errors:</b> {totalErrors}
-              </Typography>
-              <Typography variant="body2">
-                <b>Total warnings:</b> {totalWarnings}
-              </Typography>
-              {(totalErrors > 0 || totalWarnings > 0) && (
-                <Button size="small" sx={{ mt: 1 }} onClick={() => setShowDetails(v => !v)}>
-                  {showDetails ? 'Hide details' : 'Show details'}
-                </Button>
-              )}
-            </Box>
-          )}
-          {/* Collapsible Error/Warning List */}
-          {showDetails && errors.length > 0 && (
-            <Box sx={{ mb: 2 }}>
-              {errors.map((err, idx) => (
-                <Alert severity={err.includes('warning') ? 'warning' : 'error'} key={idx}>{err}</Alert>
-              ))}
-            </Box>
-          )}
-          <div style={{ height: 400, width: '100%' }}>
-            <DataGrid
-              rows={filteredRows}
-              columns={columns}
-              pageSizeOptions={[10, 25, 50]}
-              initialState={{ pagination: { paginationModel: { pageSize: 10 } } }}
-              getCellClassName={(params: GridCellParams) => {
-                const row = filteredRows[params.row.id];
-                if (row && row._rowErrors && row._rowErrors.length > 0) {
-                  return 'error-row';
-                }
-                return '';
-              }}
-              disableRowSelectionOnClick
-            />
-          </div>
         </Paper>
         {/* Chart Section */}
         <Paper elevation={1} sx={{ p: 2, mb: 4 }}>
