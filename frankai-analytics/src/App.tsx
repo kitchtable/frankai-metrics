@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AppBar, Toolbar, Typography, Container, Box, Paper, Button, Alert } from '@mui/material';
+import { AppBar, Toolbar, Typography, Container, Box, Paper, Button, Alert, FormControl, FormControlLabel, Radio, RadioGroup, FormLabel, Select, MenuItem, Chip, OutlinedInput } from '@mui/material';
 import { DataGrid, GridColDef, GridCellParams } from '@mui/x-data-grid';
 import Papa, { ParseResult } from 'papaparse';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
@@ -9,7 +9,7 @@ import { DateRangePicker } from '@mui/x-date-pickers-pro';
 import { AdapterDateFns } from '@mui/x-date-pickers/AdapterDateFns';
 import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider';
 import { enGB } from 'date-fns/locale';
-import { parse as parseDate, format as formatDate, isAfter, isBefore, isEqual } from 'date-fns';
+import { parse as parseDate, isAfter, isBefore, isEqual } from 'date-fns';
 
 // Required columns and their types
 const REQUIRED_COLUMNS = [
@@ -208,6 +208,10 @@ function App() {
   const [showDetails, setShowDetails] = useState<boolean>(false);
   const [snackbarOpen, setSnackbarOpen] = useState(false);
   const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([null, null]);
+  
+  // Entity selection state
+  const [entityFilterType, setEntityFilterType] = useState<'all' | 'brands' | 'suppliers' | 'specific'>('all');
+  const [selectedCompanies, setSelectedCompanies] = useState<string[]>([]);
 
   // Compute min/max date from data
   const allDates = getAllDates(rows);
@@ -217,8 +221,17 @@ function App() {
   // Set default date range when data loads
   React.useEffect(() => {
     if (minDate && maxDate) {
-      setDateRange([minDate, maxDate]);
+      // Only set if the current dateRange is not already [minDate, maxDate]
+      if (
+        !dateRange[0] ||
+        !dateRange[1] ||
+        dateRange[0].getTime() !== minDate.getTime() ||
+        dateRange[1].getTime() !== maxDate.getTime()
+      ) {
+        setDateRange([minDate, maxDate]);
+      }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileName]);
 
   // Filter rows by date range
@@ -234,7 +247,24 @@ function App() {
     );
   }
 
-  const filteredRows = rows.filter(r => isInRange(r['Date']));
+  // Filter rows by date range and entity selection
+  const filteredRows = rows.filter(r => {
+    // First filter by date range
+    if (!isInRange(r['Date'])) return false;
+    
+    // Then filter by entity selection
+    switch (entityFilterType) {
+      case 'brands':
+        return r['Role'] === 'Brand';
+      case 'suppliers':
+        return r['Role'] === 'Supplier';
+      case 'specific':
+        return selectedCompanies.includes(r['Company']);
+      case 'all':
+      default:
+        return true; // Show all brands and suppliers
+    }
+  });
 
   // Compute summary counts (exclude header row)
   const successfulRows = filteredRows.filter(r => r._rowErrors && r._rowErrors.length === 0);
@@ -262,6 +292,48 @@ function App() {
     return { start: chartData[0].Date.replace(/\//g, ''), end: chartData[chartData.length - 1].Date.replace(/\//g, '') };
   }
 
+  // Get current filter description
+  const getFilterDescription = () => {
+    switch (entityFilterType) {
+      case 'brands':
+        return 'All Brands';
+      case 'suppliers':
+        return 'All Suppliers';
+      case 'specific':
+        if (selectedCompanies.length === 0) {
+          return 'All Brands and Suppliers';
+        } else if (selectedCompanies.length === 1) {
+          return selectedCompanies[0];
+        } else {
+          return `${selectedCompanies.length} specific companies`;
+        }
+      case 'all':
+      default:
+        return 'All Brands and Suppliers';
+    }
+  };
+
+  // Get filter code based on entity selection
+  const getFilterCode = () => {
+    switch (entityFilterType) {
+      case 'brands':
+        return 'AB'; // All Brands
+      case 'suppliers':
+        return 'AS'; // All Suppliers
+      case 'specific':
+        if (selectedCompanies.length === 1) {
+          return selectedCompanies[0]; // Single company name
+        } else if (selectedCompanies.length > 1) {
+          return `CUSTOM${selectedCompanies.length}`; // Multiple selections
+        } else {
+          return 'ALL'; // No specific companies selected, default to all
+        }
+      case 'all':
+      default:
+        return 'ALL'; // All Brands and Suppliers
+    }
+  };
+
   // Export chart section to PNG
   const handleExport = () => {
     const chartSection = document.getElementById('chart-section-export');
@@ -273,7 +345,8 @@ function App() {
       const { start, end } = getDateRange(chartData);
       const now = new Date();
       const hhmmss = now.toTimeString().slice(0, 8).replace(/:/g, '');
-      link.download = `AT_ALL_${start}_${end}_${hhmmss}.png`;
+      const filterCode = getFilterCode();
+      link.download = `AT_${filterCode}_${start}_${end}_${hhmmss}.png`;
       link.href = canvas.toDataURL('image/png');
       link.click();
       setSnackbarOpen(true);
@@ -305,8 +378,32 @@ function App() {
             </Typography>
           )}
         </Paper>
+
+        {/* Available Analyses */}
+        <Paper elevation={1} sx={{ p: 2, mb: 4 }}>
+          <Typography variant="h6" gutterBottom>
+            Available Analyses
+          </Typography>
+          <Box>
+            <FormControlLabel
+              control={<input type="checkbox" defaultChecked disabled />}
+              label="Activity Timeline Graph"
+            />
+            <FormControlLabel
+              control={<input type="checkbox" disabled />}
+              label="User Engagement Heatmap (Coming Soon)"
+            />
+            <FormControlLabel
+              control={<input type="checkbox" disabled />}
+              label="Feature Adoption Chart (Coming Soon)"
+            />
+          </Box>
+        </Paper>
         {/* Date Range Picker */}
         <Paper elevation={1} sx={{ p: 2, mb: 4 }}>
+          <Typography variant="h6" gutterBottom>
+            2. Select Date Range
+          </Typography>
           <LocalizationProvider dateAdapter={AdapterDateFns} adapterLocale={enGB}>
             <DateRangePicker
               value={dateRange}
@@ -317,6 +414,60 @@ function App() {
               sx={{ mb: 2 }}
             />
           </LocalizationProvider>
+        </Paper>
+
+        {/* Entity Selection */}
+        <Paper elevation={1} sx={{ p: 2, mb: 4 }}>
+          <Typography variant="h6" gutterBottom>
+            3. Select Companies
+          </Typography>
+          <FormControl component="fieldset" sx={{ width: '100%' }}>
+            <FormLabel component="legend">Entity Selection:</FormLabel>
+            <RadioGroup
+              value={entityFilterType}
+              onChange={(e) => {
+                setEntityFilterType(e.target.value as 'all' | 'brands' | 'suppliers' | 'specific');
+                if (e.target.value !== 'specific') {
+                  setSelectedCompanies([]);
+                }
+              }}
+            >
+              <FormControlLabel value="all" control={<Radio />} label="All Brands and Suppliers" />
+              <FormControlLabel value="brands" control={<Radio />} label="All Brands Only" />
+              <FormControlLabel value="suppliers" control={<Radio />} label="All Suppliers Only" />
+              <FormControlLabel value="specific" control={<Radio />} label="Select Specific" />
+            </RadioGroup>
+            
+            {entityFilterType === 'specific' && (
+              <Box sx={{ mt: 2 }}>
+                <FormControl fullWidth>
+                  <FormLabel>Select Companies:</FormLabel>
+                  <Select
+                    multiple
+                    value={selectedCompanies}
+                    onChange={(e) => setSelectedCompanies(typeof e.target.value === 'string' ? e.target.value.split(',') : e.target.value)}
+                    input={<OutlinedInput />}
+                    renderValue={(selected) => (
+                      <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                        {selected.map((value) => (
+                          <Chip key={value} label={value} />
+                        ))}
+                      </Box>
+                    )}
+                  >
+                    {(() => {
+                      const companies = Array.from(new Set(rows.map(row => row.Company))).sort();
+                      return companies.map((company) => (
+                        <MenuItem key={company} value={company}>
+                          {company}
+                        </MenuItem>
+                      ));
+                    })()}
+                  </Select>
+                </FormControl>
+              </Box>
+            )}
+          </FormControl>
         </Paper>
         {/* Data Table Preview */}
         <Paper elevation={1} sx={{ p: 2, mb: 4 }}>
@@ -376,8 +527,17 @@ function App() {
             <Typography variant="subtitle1" gutterBottom>
               Activity Timeline Chart
             </Typography>
+            {filteredRows.length > 0 && (
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                Showing: {getFilterDescription()}
+              </Typography>
+            )}
             {filteredRows.length === 0 ? (
-              <Typography variant="body2">No data in selected date range.</Typography>
+              <Typography variant="body2">
+                {dateRange[0] && dateRange[1] 
+                  ? "No data found for selected date range and entity filters." 
+                  : "No data in selected date range."}
+              </Typography>
             ) : (
               (() => {
                 const { chartData, companies } = aggregateChartData(filteredRows);
@@ -423,12 +583,24 @@ function App() {
             </Button>
           </Box>
         </Paper>
-        {/* Export Button Placeholder */}
-        <Box sx={{ textAlign: 'center', mt: 2 }}>
-          <Button variant="outlined" disabled>
-            Export to PNG (coming soon)
-          </Button>
-        </Box>
+        {/* Action Buttons */}
+        <Paper elevation={1} sx={{ p: 2, mb: 4 }}>
+          <Box sx={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
+            <Button variant="contained" onClick={handleExport} disabled={filteredRows.length === 0}>
+              Generate Reports
+            </Button>
+            <Button variant="outlined" onClick={() => {
+              setEntityFilterType('all');
+              setSelectedCompanies([]);
+              setDateRange([null, null]);
+            }}>
+              Clear Selection
+            </Button>
+            <Button variant="outlined" disabled>
+              Settings
+            </Button>
+          </Box>
+        </Paper>
         {/* Snackbar notification */}
         <Snackbar
           open={snackbarOpen}
