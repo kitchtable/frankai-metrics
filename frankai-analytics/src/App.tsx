@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AppBar, Toolbar, Typography, Container, Box, Paper, Button, Alert, FormControl, FormControlLabel, Radio, RadioGroup, FormLabel, Select, MenuItem, Chip, OutlinedInput } from '@mui/material';
+import { AppBar, Toolbar, Typography, Container, Box, Paper, Button, Alert, FormControl, FormControlLabel, Radio, RadioGroup, FormLabel, Select, MenuItem, Chip, OutlinedInput, InputLabel } from '@mui/material';
 import { DataGrid, GridColDef, GridCellParams } from '@mui/x-data-grid';
 import Papa, { ParseResult } from 'papaparse';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid } from 'recharts';
@@ -12,6 +12,7 @@ import { enGB } from 'date-fns/locale';
 import { parse as parseDate, isAfter, isBefore, isEqual, startOfMonth, endOfMonth, subDays, startOfYear } from 'date-fns';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
+import { Checkbox } from '@mui/material';
 
 // Required columns and their types
 const REQUIRED_COLUMNS = [
@@ -214,6 +215,9 @@ function App() {
   // Entity selection state
   const [entityFilterType, setEntityFilterType] = useState<'all' | 'brands' | 'suppliers' | 'specific'>('all');
   const [selectedCompanies, setSelectedCompanies] = useState<string[]>([]);
+  const [selectedSeries, setSelectedSeries] = useState('Total Activities');
+  const [showRunningTotal, setShowRunningTotal] = useState(false);
+  const [showAllSeries, setShowAllSeries] = useState(false);
 
   // Compute min/max date from data
   const allDates = getAllDates(rows);
@@ -339,6 +343,52 @@ function App() {
     }
   };
 
+  // Helper: Get all numeric columns for dropdown
+  const numericColumns = [
+    'Total Activities',
+    'Frank AI Searches',
+    'Project Creations',
+    'Messages Sent',
+    'Material Saves',
+    'Doc Uploads',
+    'Project Shares',
+    'Frank AI Messages',
+    'Sample Requests',
+    'Prebookings',
+  ];
+
+  // --- Chart Data Preparation ---
+  function aggregateChartDataSeries(rows: any[], series: string) {
+    // Group by date, then by company, for the selected series
+    const dateMap: Record<string, Record<string, number>> = {};
+    const allCompanies = new Set<string>();
+    rows.forEach(row => {
+      if (row._rowErrors && row._rowErrors.length > 0) return; // skip error rows
+      const date = row['Date'];
+      const company = row['Company'];
+      const value = row[series] || 0;
+      allCompanies.add(company);
+      if (!dateMap[date]) dateMap[date] = {};
+      if (!dateMap[date][company]) dateMap[date][company] = 0;
+      dateMap[date][company] += value;
+    });
+    const companies = Array.from(allCompanies);
+    // Convert to array for Recharts, filling missing companies with 0
+    const chartData = Object.keys(dateMap).sort((a, b) => {
+      // Sort by date (DD/MM/YYYY)
+      const [da, ma, ya] = a.split('/').map(Number);
+      const [db, mb, yb] = b.split('/').map(Number);
+      return new Date(ya, ma - 1, da).getTime() - new Date(yb, mb - 1, db).getTime();
+    }).map(date => {
+      const entry: Record<string, any> = { Date: date };
+      companies.forEach(company => {
+        entry[company] = dateMap[date][company] ?? 0;
+      });
+      return entry;
+    });
+    return { chartData, companies };
+  }
+
   // Export chart section to PNG
   const handleExport = () => {
     const chartSection = document.getElementById('chart-section-export');
@@ -346,12 +396,14 @@ function App() {
     html2canvas(chartSection, { backgroundColor: '#fff', scale: 2 }).then(canvas => {
       const link = document.createElement('a');
       // Get date range for filename
-      const { chartData } = aggregateChartData(filteredRows);
+      const { chartData } = aggregateChartDataSeries(filteredRows, selectedSeries);
       const { start, end } = getDateRange(chartData);
       const now = new Date();
       const hhmmss = now.toTimeString().slice(0, 8).replace(/:/g, '');
       const filterCode = getFilterCode();
-      link.download = `AT_${filterCode}_${start}_${end}_${hhmmss}.png`;
+      const runningTotalPart = showRunningTotal ? '_RT' : '';
+      const allSeriesPart = showAllSeries ? '_ALLSERIES' : '';
+      link.download = `AT_${filterCode}_${start}_${end}_${showAllSeries ? 'AllDataSeries' : selectedSeries.replace(/\s+/g, '')}${runningTotalPart}${allSeriesPart}_${hhmmss}.png`;
       link.href = canvas.toDataURL('image/png');
       link.click();
       setSnackbarOpen(true);
@@ -423,6 +475,19 @@ function App() {
       getRange: (min: Date, max: Date) => [min, max],
     },
   ];
+
+  // Running total calculation (aggregate for all selected companies)
+  function getAggregateRunningTotalData(chartData: any[], companies: string[]) {
+    let aggTotal = 0;
+    return chartData.map((row) => {
+      let daySum = 0;
+      companies.forEach(company => {
+        daySum += row[company] || 0;
+      });
+      aggTotal += daySum;
+      return { Date: row.Date, RunningTotal: aggTotal };
+    });
+  }
 
   return (
     <Box sx={{ flexGrow: 1, minHeight: '100vh', bgcolor: '#f5f5f5' }}>
@@ -546,7 +611,7 @@ function App() {
           {minDate && maxDate && (
             <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
               {presets.map((preset) => {
-                const [presetStart, presetEnd] = preset.getRange(minDate, maxDate);
+                const [presetStart, presetEnd] = preset.getRange(minDate as Date, maxDate as Date);
                 // Disable if preset range is outside data
                 const isDisabled = presetStart > maxDate || presetEnd < minDate;
                 return (
@@ -631,13 +696,54 @@ function App() {
         </Paper>
         {/* Chart Section */}
         <Paper elevation={1} sx={{ p: 2, mb: 4 }}>
+          {/* Series selection and running total controls */}
+          <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', mb: 2, flexWrap: 'wrap' }}>
+            <FormControl size="small" sx={{ minWidth: 180 }} disabled={showAllSeries}>
+              <InputLabel id="series-select-label">Data Series</InputLabel>
+              <Select
+                labelId="series-select-label"
+                value={selectedSeries}
+                label="Data Series"
+                onChange={e => setSelectedSeries(e.target.value)}
+              >
+                {numericColumns.map(col => (
+                  <MenuItem key={col} value={col}>{col}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={showAllSeries}
+                  onChange={e => setShowAllSeries(e.target.checked)}
+                  color="primary"
+                  disabled={(() => {
+                    // Only enable if a single company is selected
+                    const { chartData, companies } = aggregateChartDataSeries(filteredRows, selectedSeries);
+                    return companies.length !== 1;
+                  })()}
+                />
+              }
+              label="Show All Data Series"
+            />
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={showRunningTotal}
+                  onChange={e => setShowRunningTotal(e.target.checked)}
+                  color="primary"
+                />
+              }
+              label="Show Running Total"
+            />
+          </Box>
           <div id="chart-section-export" style={{ position: 'relative', background: '#fff', paddingBottom: 32 }}>
             <Typography variant="subtitle1" gutterBottom>
               Activity Timeline Chart
             </Typography>
             {filteredRows.length > 0 && (
               <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-                Showing: {getFilterDescription()}
+                Showing: {getFilterDescription()} | Series: {showAllSeries ? 'All Data Series' : selectedSeries}{showRunningTotal ? ' + Running Total' : ''}
               </Typography>
             )}
             {filteredRows.length === 0 ? (
@@ -648,33 +754,65 @@ function App() {
               </Typography>
             ) : (
               (() => {
-                const { chartData, companies } = aggregateChartData(filteredRows);
-                if (chartData.length === 0 || companies.length === 0) {
-                  return <Typography variant="body2">No valid data to display.</Typography>;
-                }
+                // If showAllSeries and only one company, plot all numeric columns for that company
+                const { chartData, companies } = aggregateChartDataSeries(filteredRows, selectedSeries);
+                let linesToPlot = [];
+                let chartDataToUse = chartData;
                 const colors = [
                   '#1976d2', '#388e3c', '#fbc02d', '#d32f2f', '#7b1fa2', '#0288d1', '#c2185b', '#ffa000', '#388e3c', '#303f9f',
                   '#0097a7', '#f57c00', '#512da8', '#00796b', '#c62828', '#0288d1', '#fbc02d', '#388e3c', '#1976d2', '#d32f2f'
                 ];
+                if (showAllSeries && companies.length === 1) {
+                  // Build chartData with all numeric columns for the single company
+                  chartDataToUse = chartData.map(row => {
+                    const entry: Record<string, any> = { Date: row.Date };
+                    numericColumns.forEach(col => {
+                      entry[col] = filteredRows.find(r => r['Date'] === row.Date && r['Company'] === companies[0])?.[col] || 0;
+                    });
+                    return entry;
+                  });
+                  linesToPlot = numericColumns;
+                } else {
+                  linesToPlot = companies;
+                }
+                // Running total data
+                let runningTotalData: any[] = [];
+                if (showRunningTotal) {
+                  runningTotalData = getAggregateRunningTotalData(chartData, companies);
+                }
                 return (
                   <ResponsiveContainer width="100%" height={350}>
-                    <LineChart data={chartData} margin={{ top: 20, right: 30, left: 0, bottom: 0 }}>
+                    <LineChart data={chartDataToUse} margin={{ top: 20, right: 30, left: 0, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="Date" />
                       <YAxis />
                       <Tooltip />
                       <Legend />
-                      {companies.map((company, idx) => (
+                      {linesToPlot.map((lineKey, idx) => (
                         <Line
-                          key={company}
+                          key={lineKey}
                           type="monotone"
-                          dataKey={company}
+                          dataKey={lineKey}
                           stroke={colors[idx % colors.length]}
                           strokeWidth={2}
                           dot={false}
                           isAnimationActive={false}
                         />
                       ))}
+                      {showRunningTotal && runningTotalData.length > 0 && (
+                        <Line
+                          key="RunningTotal"
+                          type="monotone"
+                          data={runningTotalData}
+                          dataKey="RunningTotal"
+                          stroke="#d32f2f"
+                          strokeWidth={3}
+                          dot={false}
+                          isAnimationActive={false}
+                          strokeDasharray="8 4"
+                          name={"Aggregate Running Total"}
+                        />
+                      )}
                     </LineChart>
                   </ResponsiveContainer>
                 );
