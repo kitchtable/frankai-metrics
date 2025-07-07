@@ -13,6 +13,7 @@ import { parse as parseDate, isAfter, isBefore, isEqual, startOfMonth, endOfMont
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import { Checkbox } from '@mui/material';
+import jsPDF from 'jspdf';
 
 // Required columns and their types
 const REQUIRED_COLUMNS = [
@@ -218,6 +219,7 @@ function App() {
   const [selectedSeries, setSelectedSeries] = useState('Total Activities');
   const [showRunningTotal, setShowRunningTotal] = useState(false);
   const [showAllSeries, setShowAllSeries] = useState(false);
+  const [generatingPDF, setGeneratingPDF] = useState(false);
 
   // Compute min/max date from data
   const allDates = getAllDates(rows);
@@ -488,6 +490,148 @@ function App() {
       return { Date: row.Date, RunningTotal: aggTotal };
     });
   }
+
+  // Generate Reports PDF (sequential, robust)
+  const handleGenerateReports = async () => {
+    setGeneratingPDF(true);
+    try {
+      const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
+      let y = 40;
+      // Branding and filter summary (cover page)
+      doc.setFontSize(20);
+      doc.text('FrankAI Analytics Report', 40, y);
+      y += 30;
+      doc.setFontSize(12);
+      doc.text(`Generated: ${new Date().toLocaleString()}`, 40, y);
+      y += 20;
+      doc.text(`Date Range: ${dateRange[0]?.toLocaleDateString() || ''} - ${dateRange[1]?.toLocaleDateString() || ''}`, 40, y);
+      y += 20;
+      doc.text(`Entity Filter: ${getFilterDescription()}`, 40, y);
+      // For each brand/supplier in scope, alphabetical order, start each on a new page after cover
+      const { chartData, companies } = aggregateChartDataSeries(filteredRows, 'Total Activities');
+      const sortedCompanies = [...companies].sort((a, b) => a.localeCompare(b));
+      for (const company of sortedCompanies) {
+        doc.addPage();
+        let pageY = 40;
+        // Filter data for this company
+        const companyData = chartData.map(row => ({ Date: row.Date, [company]: row[company] }));
+        // Prepare running total
+        let runningTotal = 0;
+        const companyDataWithRT = companyData.map(row => {
+          runningTotal += row[company] || 0;
+          return { ...row, RunningTotal: runningTotal };
+        });
+        // Render first chart (Total Activities + Running Total)
+        const chartContainer1 = document.createElement('div');
+        chartContainer1.style.position = 'fixed';
+        chartContainer1.style.left = '-9999px';
+        chartContainer1.style.width = '600px';
+        chartContainer1.style.height = '200px';
+        document.body.appendChild(chartContainer1);
+        const ReactDOM = await import('react-dom/client');
+        const { createRoot } = ReactDOM;
+        const root1 = createRoot(chartContainer1);
+        root1.render(
+          <ResponsiveContainer width={600} height={200}>
+            <LineChart data={companyDataWithRT} margin={{ top: 20, right: 30, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="Date" />
+              <YAxis />
+              <Tooltip />
+              <Legend />
+              <Line
+                key={company}
+                type="monotone"
+                dataKey={company}
+                stroke="#1976d2"
+                strokeWidth={2}
+                dot={false}
+                isAnimationActive={false}
+                name="Total Activities"
+              />
+              <Line
+                key="RunningTotal"
+                type="monotone"
+                dataKey="RunningTotal"
+                stroke="#d32f2f"
+                strokeWidth={3}
+                dot={false}
+                isAnimationActive={false}
+                strokeDasharray="8 4"
+                name="Running Total"
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        );
+        await new Promise(resolve => setTimeout(resolve, 500));
+        const canvas1 = await html2canvas(chartContainer1, { backgroundColor: '#fff', scale: 2 });
+        const imgData1 = canvas1.toDataURL('image/png');
+        document.body.removeChild(chartContainer1);
+        // Prepare data for second chart (all activity types except Total Activities)
+        const activityTypes = numericColumns.filter(col => col !== 'Total Activities');
+        const companyActivityData = chartData.map(row => {
+          const entry: Record<string, any> = { Date: row.Date };
+          activityTypes.forEach(col => {
+            entry[col] = filteredRows.find(r => r['Date'] === row.Date && r['Company'] === company)?.[col] || 0;
+          });
+          return entry;
+        });
+        // Render second chart (all activity types)
+        const chartContainer2 = document.createElement('div');
+        chartContainer2.style.position = 'fixed';
+        chartContainer2.style.left = '-9999px';
+        chartContainer2.style.width = '600px';
+        chartContainer2.style.height = '200px';
+        document.body.appendChild(chartContainer2);
+        const root2 = createRoot(chartContainer2);
+        root2.render(
+          <ResponsiveContainer width={600} height={200}>
+            <LineChart data={companyActivityData} margin={{ top: 20, right: 30, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="Date" />
+              <YAxis />
+              <Tooltip />
+              <Legend />
+              {activityTypes.map((col, idx) => (
+                <Line
+                  key={col}
+                  type="monotone"
+                  dataKey={col}
+                  stroke={['#1976d2', '#388e3c', '#fbc02d', '#d32f2f', '#7b1fa2', '#0288d1', '#c2185b', '#ffa000', '#388e3c', '#303f9f'][idx % 10]}
+                  strokeWidth={2}
+                  dot={false}
+                  isAnimationActive={false}
+                  name={col}
+                />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        );
+        await new Promise(resolve => setTimeout(resolve, 500));
+        const canvas2 = await html2canvas(chartContainer2, { backgroundColor: '#fff', scale: 2 });
+        const imgData2 = canvas2.toDataURL('image/png');
+        document.body.removeChild(chartContainer2);
+        // Add brand label and both charts to the page
+        doc.setFontSize(14);
+        doc.text(company, 40, pageY);
+        pageY += 20;
+        doc.addImage(imgData1, 'PNG', 40, pageY, 500, 170);
+        pageY += 180;
+        // Add extra space between charts
+        pageY += 30;
+        doc.setFontSize(12);
+        doc.text('Activity Type Breakdown', 40, pageY);
+        pageY += 15;
+        doc.addImage(imgData2, 'PNG', 40, pageY, 500, 170);
+      }
+      doc.save('FrankAI-Analytics-Report.pdf');
+      setGeneratingPDF(false);
+      setSnackbarOpen(true);
+    } catch (err) {
+      setGeneratingPDF(false);
+      alert('Failed to generate PDF: ' + err);
+    }
+  };
 
   return (
     <Box sx={{ flexGrow: 1, minHeight: '100vh', bgcolor: '#f5f5f5' }}>
@@ -832,8 +976,8 @@ function App() {
         {/* Action Buttons */}
         <Paper elevation={1} sx={{ p: 2, mb: 4 }}>
           <Box sx={{ display: 'flex', gap: 2, justifyContent: 'center' }}>
-            <Button variant="contained" onClick={handleExport} disabled={filteredRows.length === 0}>
-              Generate Reports
+            <Button variant="contained" onClick={handleGenerateReports} disabled={filteredRows.length === 0 || generatingPDF}>
+              {generatingPDF ? 'Generating PDF...' : 'Generate Reports'}
             </Button>
             <Button variant="outlined" onClick={() => {
               setEntityFilterType('all');
