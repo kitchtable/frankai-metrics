@@ -14,6 +14,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import { Checkbox } from '@mui/material';
 import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 // Required columns and their types
 const REQUIRED_COLUMNS = [
@@ -752,51 +753,22 @@ function App() {
       const periods = [7, 14, 30, 90, 180];
       // Use all available data for this brand from the original upload
       const allRowsForBrand = originalRows.filter((r: any) => r['Company'] === company);
-      const lastDate = allRowsForBrand.length
-        ? allRowsForBrand
-            .map((r: any) => parseDateString(r['Date']))
-            .reduce((a: Date, b: Date) => (a > b ? a : b))
-        : null;
       // Get activity types for table, sort alphabetically, and add 'Total Activities' as last row
       let activityTypesForTable = numericColumns.filter(col => col !== 'Total Activities').sort((a, b) => a.localeCompare(b));
       activityTypesForTable.push('Total Activities');
-      // Render table as HTML
-      const tableContainer = document.createElement('div');
-      tableContainer.style.position = 'fixed';
-      tableContainer.style.left = '-9999px';
-      tableContainer.style.width = '700px';
-      tableContainer.style.background = '#fff';
-      tableContainer.style.paddingTop = '10px';
-      const table = document.createElement('table');
-      table.style.borderCollapse = 'collapse';
-      table.style.width = '100%';
-      table.style.fontSize = '14pt';
-      table.style.border = '2px solid #444';
-      // Header row
-      const header = document.createElement('tr');
-      const th1 = document.createElement('th'); th1.innerText = 'Activity Type'; th1.style.border = '2px solid #444'; th1.style.padding = '12px'; th1.style.background = '#e0e0e0'; th1.style.fontWeight = 'bold'; th1.style.textAlign = 'center'; header.appendChild(th1);
-      periods.forEach(p => {
-        const th = document.createElement('th'); th.colSpan = 2; th.innerText = `${p}d`; th.style.border = '2px solid #444'; th.style.padding = '12px'; th.style.background = '#e0e0e0'; th.style.fontWeight = 'bold'; th.style.textAlign = 'center'; header.appendChild(th);
-      });
-      table.appendChild(header);
-      // Sub-header for avg/actual
-      const subHeader = document.createElement('tr');
-      const empty = document.createElement('td'); empty.innerText = ''; empty.style.background = '#e0e0e0'; subHeader.appendChild(empty);
-      periods.forEach(() => {
-        const avg = document.createElement('td'); avg.innerText = 'Avg'; avg.style.border = '2px solid #444'; avg.style.padding = '6px'; avg.style.background = '#e0e0e0'; avg.style.fontWeight = 'bold'; avg.style.textAlign = 'center'; subHeader.appendChild(avg);
-        const actual = document.createElement('td'); actual.innerText = 'Actual'; actual.style.border = '2px solid #444'; actual.style.padding = '6px'; actual.style.background = '#e0e0e0'; actual.style.fontWeight = 'bold'; actual.style.textAlign = 'center'; subHeader.appendChild(actual);
-      });
-      table.appendChild(subHeader);
-      // Data rows
-      activityTypesForTable.forEach((activity, rowIndex) => {
-        const row = document.createElement('tr');
-        row.style.background = (rowIndex % 2 === 0) ? '#fff' : '#f7f7f7';
-        const tdName = document.createElement('td'); tdName.innerText = activity; tdName.style.border = '2px solid #444'; tdName.style.padding = '12px'; tdName.style.textAlign = 'center'; row.appendChild(tdName);
+      // Build table head
+      const head = [
+        [
+          'Activity Type',
+          ...periods.flatMap(p => [`${p}d Avg`, `${p}d Actual`])
+        ]
+      ];
+      // Build table body
+      const msPerDay = 24 * 60 * 60 * 1000;
+      const end = new Date();
+      const body = activityTypesForTable.map(activity => {
+        const row = [activity];
         periods.forEach(period => {
-          // Calculate avg and actual
-          const msPerDay = 24 * 60 * 60 * 1000;
-          if (!lastDate) return; // skip if no data for this company
-          const end = new Date();
           const start = new Date(end.getTime() - (period - 1) * msPerDay);
           const periodRows = allRowsForBrand.filter((r: any) => {
             const d = parseDateString(r['Date']);
@@ -804,24 +776,27 @@ function App() {
           });
           const actual = periodRows.reduce((acc: number, r: any) => acc + (Number(r[activity]) || 0), 0);
           const avg = actual / period;
-          const tdAvg = document.createElement('td'); tdAvg.innerText = avg.toFixed(1); tdAvg.style.border = '2px solid #444'; tdAvg.style.padding = '12px'; tdAvg.style.textAlign = 'center'; row.appendChild(tdAvg);
-          const tdActual = document.createElement('td'); tdActual.innerText = actual.toString(); tdActual.style.border = '2px solid #444'; tdActual.style.padding = '12px'; tdActual.style.textAlign = 'center'; row.appendChild(tdActual);
+          row.push(avg.toFixed(1), actual.toString());
         });
-        table.appendChild(row);
+        return row;
       });
-      tableContainer.appendChild(table);
-      // Add legend for trend arrows
-      const legend = document.createElement('div');
-      legend.style.marginTop = '18px';
-      legend.style.fontSize = '13pt';
-      legend.innerHTML = '<b>Legend:</b> <span style="color:green;font-size:18px;font-weight:bold;">↑</span> Up &nbsp; <span style="color:red;font-size:18px;font-weight:bold;">↓</span> Down &nbsp; <span style="color:gray;font-size:18px;font-weight:bold;">→</span> Flat';
-      tableContainer.appendChild(legend);
-      document.body.appendChild(tableContainer);
-      await new Promise(resolve => setTimeout(resolve, 200));
-      const tableCanvas = await html2canvas(tableContainer, { backgroundColor: '#fff', scale: 2 });
-      const tableImg = tableCanvas.toDataURL('image/png');
-      document.body.removeChild(tableContainer);
-      doc.addImage(tableImg, 'PNG', 40, pageY, 500, 350);
+      // Render table with jsPDF-AutoTable
+      autoTable(doc, {
+        head,
+        body,
+        startY: pageY,
+        theme: 'grid',
+        headStyles: { fillColor: [224, 224, 224], textColor: 20, fontStyle: 'bold', halign: 'center' },
+        bodyStyles: { halign: 'center', fontSize: 12 },
+        alternateRowStyles: { fillColor: [247, 247, 247] },
+        styles: { cellPadding: 6, font: 'helvetica' },
+        columnStyles: { 0: { halign: 'left', fontStyle: 'bold' } },
+        margin: { left: 40, right: 40 },
+      });
+      // Add legend below table
+      const legendY = (doc as any).lastAutoTable.finalY + 18;
+      doc.setFontSize(12);
+      doc.text('Legend: Avg = average per calendar day in period, Actual = total events in period', 40, legendY);
     }
     doc.save('FrankAI-Analytics-TrendTables.pdf');
   };
