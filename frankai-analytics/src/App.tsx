@@ -703,7 +703,7 @@ function App() {
         document.body.removeChild(chartContainer2);
         // Add brand label and both charts to the page
         doc.setFontSize(14);
-        doc.text(company, 40, pageY);
+        doc.text(`Brand: ${company}`, 40, pageY);
         pageY += 20;
         doc.addImage(imgData1, 'PNG', 40, pageY, 500, 170);
         pageY += 180;
@@ -739,20 +739,169 @@ function App() {
     const sortedCompanies = [...companiesInScope].sort((a, b) => a.localeCompare(b));
     const originalRows = rows.map(row => ({ ...row }));
     const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
-    for (let i = 0; i < sortedCompanies.length; i++) {
-      const company = sortedCompanies[i];
-      if (i > 0) doc.addPage();
+    
+    // Calculate date range for subtitle
+    const end = new Date();
+    const start = new Date(end.getTime() - (180 - 1) * 24 * 60 * 60 * 1000);
+    const dateRangeText = `Activity from ${start.toLocaleDateString()} to ${end.toLocaleDateString()}`;
+    
+    // Separate brands and suppliers
+    const brandsInScope = sortedCompanies.filter(company => 
+      originalRows.some(row => row['Company'] === company && row['Role'] === 'Brand')
+    );
+    const suppliersInScope = sortedCompanies.filter(company => 
+      originalRows.some(row => row['Company'] === company && row['Role'] === 'Supplier')
+    );
+    
+    // Table periods
+    const periods = [7, 14, 30, 90, 180];
+    const msPerDay = 24 * 60 * 60 * 1000;
+    
+    // Helper function to create summary table
+    const createSummaryTable = (companies: string[], title: string, pageY: number) => {
+      // Build summary table head
+      const summaryHead = [
+        [
+          'Company',
+          ...periods.flatMap(p => [`${p}d Avg`, `${p}d Actual`])
+        ]
+      ];
+      
+      // Build summary table body with one row per company
+      const summaryBody = companies.map(company => {
+        const row = [company];
+        periods.forEach(period => {
+          const periodStart = new Date(end.getTime() - (period - 1) * msPerDay);
+          const periodRows = originalRows.filter((r: any) => {
+            const d = parseDateString(r['Date']);
+            return d >= periodStart && d <= end && r['Company'] === company;
+          });
+          const actual = periodRows.reduce((acc: number, r: any) => acc + (Number(r['Total Activities']) || 0), 0);
+          const avg = actual / period;
+          row.push(avg.toFixed(1), actual.toString());
+        });
+        return row;
+      });
+      
+      // Add total row at the bottom
+      const totalRow = ['Total Activities'];
+      periods.forEach(period => {
+        const periodStart = new Date(end.getTime() - (period - 1) * msPerDay);
+        const periodRows = originalRows.filter((r: any) => {
+          const d = parseDateString(r['Date']);
+          return d >= periodStart && d <= end && companies.includes(r['Company']);
+        });
+        const actual = periodRows.reduce((acc: number, r: any) => acc + (Number(r['Total Activities']) || 0), 0);
+        const avg = actual / period;
+        totalRow.push(avg.toFixed(1), actual.toString());
+      });
+      summaryBody.push(totalRow);
+      
+      // Render summary table
+      autoTable(doc, {
+        head: summaryHead,
+        body: summaryBody,
+        startY: pageY,
+        theme: 'grid',
+        headStyles: { fillColor: [224, 224, 224], textColor: 20, fontStyle: 'bold', halign: 'center' },
+        bodyStyles: { halign: 'center', fontSize: 12 },
+        alternateRowStyles: { fillColor: [247, 247, 247] },
+        styles: { cellPadding: 6, font: 'helvetica' },
+        columnStyles: { 0: { halign: 'left', fontStyle: 'bold' } },
+        margin: { left: 40, right: 40 },
+        didParseCell: function (data) {
+          // Highlight the 'Total Activities' row like the header
+          if (data.row.index === summaryBody.length - 1) {
+            data.cell.styles.fillColor = [224, 224, 224];
+            data.cell.styles.fontStyle = 'bold';
+          }
+          // Indicator colors for Avg columns only
+          if (data.row.section === 'body' && data.column.index > 0) {
+            const colIdx = data.column.index - 1; // skip Company
+            const periodIdx = Math.floor(colIdx / 2);
+            const isAvg = colIdx % 2 === 0;
+            // Only apply color to Avg columns
+            if (isAvg && periodIdx < periods.length - 1) {
+              const thisVal = parseFloat(String(data.cell.raw));
+              const nextVal = parseFloat(String(summaryBody[data.row.index][1 + (periodIdx + 1) * 2]));
+              if (!isNaN(thisVal) && !isNaN(nextVal)) {
+                if (thisVal > nextVal) {
+                  data.cell.styles.textColor = [0, 128, 0]; // green
+                } else if (thisVal < nextVal) {
+                  data.cell.styles.textColor = [220, 38, 38]; // red
+                } else {
+                  data.cell.styles.textColor = [234, 179, 8]; // yellow
+                }
+              }
+            }
+          }
+          // Bold right border after first column and every 2 columns (after each period)
+          if (
+            data.column.index === 0 ||
+            (data.column.index > 0 && (data.column.index - 1) % 2 === 1)
+          ) {
+            data.cell.styles.lineWidth = { right: 1.5 };
+            data.cell.styles.lineColor = [0, 0, 0];
+          }
+        },
+      });
+      
+      // Add legend below summary table
+      const summaryLegendY = (doc as any).lastAutoTable.finalY + 18;
+      doc.setFontSize(12);
+      doc.text('Legend: Avg = average per calendar day in period, Actual = total events in period', 40, summaryLegendY);
+      doc.text('Colour meaning: Green = higher than next period, Red = lower, Yellow = same as next period.', 40, summaryLegendY + 16);
+    };
+    
+    // Page 1: Brand summary table (if brands exist)
+    if (brandsInScope.length > 0) {
       let pageY = 60;
       doc.setFontSize(22);
-      doc.text(company, 40, pageY);
+      doc.text('Activity Summary Across All Brands', 40, pageY);
       pageY += 30;
       doc.setFontSize(14);
-      doc.text('Recent Activity Trends', 40, pageY);
+      doc.text(dateRangeText, 40, pageY);
       pageY += 20;
-      // Table periods
-      const periods = [7, 14, 30, 90, 180];
-      // Use all available data for this brand from the original upload
-      const allRowsForBrand = originalRows.filter((r: any) => r['Company'] === company);
+      
+      createSummaryTable(brandsInScope, 'Brands', pageY);
+    }
+    
+    // Page 2: Supplier summary table (if suppliers exist)
+    if (suppliersInScope.length > 0) {
+      doc.addPage();
+      let pageY = 60;
+      doc.setFontSize(22);
+      doc.text('Activity Summary Across All Suppliers', 40, pageY);
+      pageY += 30;
+      doc.setFontSize(14);
+      doc.text(dateRangeText, 40, pageY);
+      pageY += 20;
+      
+      createSummaryTable(suppliersInScope, 'Suppliers', pageY);
+    }
+    
+    // Individual company pages - brands first, then suppliers
+    const allCompaniesInOrder = [...brandsInScope, ...suppliersInScope];
+    for (let i = 0; i < allCompaniesInOrder.length; i++) {
+      const company = allCompaniesInOrder[i];
+      if (i > 0 || brandsInScope.length > 0 || suppliersInScope.length > 0) {
+        doc.addPage();
+      }
+      let pageY = 60;
+      
+      // Determine if this is a brand or supplier
+      const companyRole = originalRows.find(row => row['Company'] === company)?.['Role'] || 'Unknown';
+      const rolePrefix = companyRole === 'Brand' ? 'Brand: ' : 'Supplier: ';
+      
+      doc.setFontSize(22);
+      doc.text(`${rolePrefix}${company}`, 40, pageY);
+      pageY += 30;
+      doc.setFontSize(14);
+      doc.text(dateRangeText, 40, pageY);
+      pageY += 20;
+      
+      // Use all available data for this company from the original upload
+      const allRowsForCompany = originalRows.filter((r: any) => r['Company'] === company);
       // Get activity types for table, sort alphabetically, and add 'Total Activities' as last row
       let activityTypesForTable = numericColumns.filter(col => col !== 'Total Activities').sort((a, b) => a.localeCompare(b));
       activityTypesForTable.push('Total Activities');
@@ -764,13 +913,11 @@ function App() {
         ]
       ];
       // Build table body
-      const msPerDay = 24 * 60 * 60 * 1000;
-      const end = new Date();
       const body = activityTypesForTable.map(activity => {
         const row = [activity];
         periods.forEach(period => {
           const start = new Date(end.getTime() - (period - 1) * msPerDay);
-          const periodRows = allRowsForBrand.filter((r: any) => {
+          const periodRows = allRowsForCompany.filter((r: any) => {
             const d = parseDateString(r['Date']);
             return d >= start && d <= end;
           });
@@ -792,13 +939,54 @@ function App() {
         styles: { cellPadding: 6, font: 'helvetica' },
         columnStyles: { 0: { halign: 'left', fontStyle: 'bold' } },
         margin: { left: 40, right: 40 },
+        didParseCell: function (data) {
+          // Highlight the 'Total Activities' row like the header
+          if (data.row.index === body.length - 1) {
+            data.cell.styles.fillColor = [224, 224, 224];
+            data.cell.styles.fontStyle = 'bold';
+          }
+          // Indicator colors for Avg/Actual cells (not for header or first column)
+          if (data.row.section === 'body' && data.column.index > 0 && data.row.index < body.length - 1) {
+            const colIdx = data.column.index - 1; // skip Activity Type
+            const periodIdx = Math.floor(colIdx / 2);
+            const isAvg = colIdx % 2 === 0;
+            // Only apply color to Avg columns
+            if (isAvg && periodIdx < periods.length - 1) {
+              const thisVal = parseFloat(String(data.cell.raw));
+              const nextVal = parseFloat(String(body[data.row.index][1 + (periodIdx + 1) * 2]));
+              if (!isNaN(thisVal) && !isNaN(nextVal)) {
+                if (thisVal > nextVal) {
+                  data.cell.styles.textColor = [0, 128, 0]; // green
+                } else if (thisVal < nextVal) {
+                  data.cell.styles.textColor = [220, 38, 38]; // red
+                } else {
+                  data.cell.styles.textColor = [234, 179, 8]; // yellow
+                }
+              }
+            }
+          }
+          // Bold right border after first column and every 2 columns (after each period)
+          if (
+            data.column.index === 0 ||
+            (data.column.index > 0 && (data.column.index - 1) % 2 === 1)
+          ) {
+            data.cell.styles.lineWidth = { right: 1.5 };
+            data.cell.styles.lineColor = [0, 0, 0];
+          }
+        },
       });
       // Add legend below table
       const legendY = (doc as any).lastAutoTable.finalY + 18;
       doc.setFontSize(12);
       doc.text('Legend: Avg = average per calendar day in period, Actual = total events in period', 40, legendY);
+      doc.text('Colour meaning: Green = higher than next period, Red = lower, Yellow = same as next period.', 40, legendY + 16);
     }
-    doc.save('FrankAI-Analytics-TrendTables.pdf');
+    // Generate a filename similar to chart export, but without timestamp
+    const { chartData } = aggregateChartDataSeries(filteredRows, 'Total Activities');
+    const { start: startDate, end: endDate } = getDateRange(chartData);
+    const filterCode = getFilterCode();
+    const filename = `Activity_Table_${filterCode}_${startDate}_${endDate}.pdf`;
+    doc.save(filename);
   };
 
   return (
@@ -829,10 +1017,25 @@ function App() {
 
         {/* Data Table Preview */}
         <Paper elevation={1} sx={{ p: 2, mb: 4 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Typography variant="subtitle1" gutterBottom>
-              Data Table Preview
-            </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              <Typography variant="subtitle1" gutterBottom sx={{ mb: 0 }}>
+                Data Table Preview
+              </Typography>
+              {/* Summary Counts - always visible */}
+              {(filteredRows.length > 0) && (
+                <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
+                  <Typography variant="body2" sx={{ color: 'success.main', fontWeight: 'bold' }}>
+                    ✓ {successfulRows.length} successful
+                  </Typography>
+                  {unsuccessfulRows.length > 0 && (
+                    <Typography variant="body2" sx={{ color: 'error.main', fontWeight: 'bold' }}>
+                      ✗ {unsuccessfulRows.length} unsuccessful
+                    </Typography>
+                  )}
+                </Box>
+              )}
+            </Box>
             <Button
               size="small"
               startIcon={dataTableOpen ? <ExpandLessIcon /> : <ExpandMoreIcon />}
@@ -843,7 +1046,7 @@ function App() {
           </Box>
           {dataTableOpen && (
             <>
-              {/* Summary Counts */}
+              {/* Detailed Summary Counts */}
               {(filteredRows.length > 0) && (
                 <Box sx={{ mb: 2 }}>
                   <Typography variant="body2">
