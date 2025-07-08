@@ -205,6 +205,43 @@ function getAllDates(rows: any[]) {
     .filter((d): d is Date => d instanceof Date && !isNaN(d.getTime()));
 }
 
+function calcAvgAndTrend(activity: any, periodDays: any, endDate: any, allRows: any, company: any) {
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const end = new Date(endDate);
+  const start = new Date(end.getTime() - (periodDays - 1) * msPerDay);
+  const prevEnd = new Date(start.getTime() - msPerDay);
+  const prevStart = new Date(prevEnd.getTime() - (periodDays - 1) * msPerDay);
+  const currRows = allRows.filter((r: any) => r['Company'] === company && new Date(r['Date']) >= start && new Date(r['Date']) <= end);
+  const prevRows = allRows.filter((r: any) => r['Company'] === company && new Date(r['Date']) >= prevStart && new Date(r['Date']) <= prevEnd);
+  const currDays = new Set(currRows.map((r: any) => r['Date'])).size || 1;
+  const prevDays = new Set(prevRows.map((r: any) => r['Date'])).size || 1;
+  const currSum = currRows.reduce((acc: any, r: any) => acc + (Number(r[activity]) || 0), 0);
+  const prevSum = prevRows.reduce((acc: any, r: any) => acc + (Number(r[activity]) || 0), 0);
+  const currAvg = currSum / currDays;
+  const prevAvg = prevSum / prevDays;
+  let trend = '→';
+  if (prevAvg === 0 && currAvg > 0) trend = '↑';
+  else if (prevAvg > 0) {
+    const pct = (currAvg - prevAvg) / prevAvg;
+    if (pct > 0.1) trend = '↑';
+    else if (pct < -0.1) trend = '↓';
+  }
+  return { currAvg, trend };
+}
+
+function parseDateString(dateStr: string): Date {
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(dateStr)) {
+    // DD/MM/YYYY
+    const [d, m, y] = dateStr.split('/').map(Number);
+    return new Date(y, m - 1, d);
+  } else if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    // YYYY-MM-DD
+    const [y, m, d] = dateStr.split('-').map(Number);
+    return new Date(y, m - 1, d);
+  }
+  return new Date(dateStr); // fallback
+}
+
 function App() {
   const [rows, setRows] = useState<any[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
@@ -491,6 +528,7 @@ function App() {
     });
   }
 
+  // --- Activity Trends Table ---
   // Generate Reports PDF (sequential, robust)
   const handleGenerateReports = async () => {
     setGeneratingPDF(true);
@@ -507,9 +545,60 @@ function App() {
       doc.text(`Date Range: ${dateRange[0]?.toLocaleDateString() || ''} - ${dateRange[1]?.toLocaleDateString() || ''}`, 40, y);
       y += 20;
       doc.text(`Entity Filter: ${getFilterDescription()}`, 40, y);
+      // Insert a new page for the Activity Timeline Chart for all brands in scope
+      // Prepare chart data for all brands in scope (filteredRows, 'Total Activities')
+      const { chartData: chartDataAllBrands, companies: companiesAllBrands } = aggregateChartDataSeries(filteredRows, 'Total Activities');
+      doc.addPage();
+      let chartPageY = 40;
+      doc.setFontSize(16);
+      doc.text('Activity Timeline Chart (All Brands in Scope)', 40, chartPageY);
+      chartPageY += 20;
+      // Render the chart as in the UI
+      const chartContainer = document.createElement('div');
+      chartContainer.style.position = 'fixed';
+      chartContainer.style.left = '-9999px';
+      chartContainer.style.width = '600px';
+      chartContainer.style.height = '250px';
+      document.body.appendChild(chartContainer);
+      const ReactDOM = await import('react-dom/client');
+      const { createRoot } = ReactDOM;
+      const root = createRoot(chartContainer);
+      const colors = [
+        '#1976d2', '#388e3c', '#fbc02d', '#d32f2f', '#7b1fa2', '#0288d1', '#c2185b', '#ffa000', '#388e3c', '#303f9f',
+        '#0097a7', '#f57c00', '#512da8', '#00796b', '#c62828', '#0288d1', '#fbc02d', '#388e3c', '#1976d2', '#d32f2f'
+      ];
+      root.render(
+        <ResponsiveContainer width={600} height={250}>
+          <LineChart data={chartDataAllBrands} margin={{ top: 20, right: 30, left: 0, bottom: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey="Date" />
+            <YAxis />
+            <Tooltip />
+            <Legend />
+            {companiesAllBrands.map((company, idx) => (
+              <Line
+                key={company}
+                type="monotone"
+                dataKey={company}
+                stroke={colors[idx % colors.length]}
+                strokeWidth={2}
+                dot={false}
+                isAnimationActive={false}
+                name={company}
+              />
+            ))}
+          </LineChart>
+        </ResponsiveContainer>
+      );
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const chartCanvas = await html2canvas(chartContainer, { backgroundColor: '#fff', scale: 2 });
+      const chartImg = chartCanvas.toDataURL('image/png');
+      document.body.removeChild(chartContainer);
+      doc.addImage(chartImg, 'PNG', 40, chartPageY, 500, 200);
       // For each brand/supplier in scope, alphabetical order, start each on a new page after cover
       const { chartData, companies } = aggregateChartDataSeries(filteredRows, 'Total Activities');
       const sortedCompanies = [...companies].sort((a, b) => a.localeCompare(b));
+      const originalRows = rows.map(row => ({ ...row }));
       for (const company of sortedCompanies) {
         doc.addPage();
         let pageY = 40;
@@ -633,6 +722,110 @@ function App() {
     }
   };
 
+  // Add after the existing PDF export function
+  const handleGenerateTrendTablesPDF = async () => {
+    const { companies } = aggregateChartDataSeries(rows, 'Total Activities');
+    let companiesInScope: string[] = [];
+    if (entityFilterType === 'all') {
+      companiesInScope = [...companies];
+    } else if (entityFilterType === 'brands') {
+      companiesInScope = Array.from(new Set(rows.filter(r => r['Role'] === 'Brand').map(r => r['Company'])));
+    } else if (entityFilterType === 'suppliers') {
+      companiesInScope = Array.from(new Set(rows.filter(r => r['Role'] === 'Supplier').map(r => r['Company'])));
+    } else if (entityFilterType === 'specific') {
+      companiesInScope = [...selectedCompanies];
+    }
+    const sortedCompanies = [...companiesInScope].sort((a, b) => a.localeCompare(b));
+    const originalRows = rows.map(row => ({ ...row }));
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+    for (let i = 0; i < sortedCompanies.length; i++) {
+      const company = sortedCompanies[i];
+      if (i > 0) doc.addPage();
+      let pageY = 60;
+      doc.setFontSize(22);
+      doc.text(company, 40, pageY);
+      pageY += 30;
+      doc.setFontSize(14);
+      doc.text('Recent Activity Trends', 40, pageY);
+      pageY += 20;
+      // Table periods
+      const periods = [7, 14, 30, 90, 180];
+      // Use all available data for this brand from the original upload
+      const allRowsForBrand = originalRows.filter((r: any) => r['Company'] === company);
+      const lastDate = allRowsForBrand.length
+        ? allRowsForBrand
+            .map((r: any) => parseDateString(r['Date']))
+            .reduce((a: Date, b: Date) => (a > b ? a : b))
+        : null;
+      // Get activity types for table, sort alphabetically, and add 'Total Activities' as last row
+      let activityTypesForTable = numericColumns.filter(col => col !== 'Total Activities').sort((a, b) => a.localeCompare(b));
+      activityTypesForTable.push('Total Activities');
+      // Render table as HTML
+      const tableContainer = document.createElement('div');
+      tableContainer.style.position = 'fixed';
+      tableContainer.style.left = '-9999px';
+      tableContainer.style.width = '700px';
+      tableContainer.style.background = '#fff';
+      tableContainer.style.paddingTop = '10px';
+      const table = document.createElement('table');
+      table.style.borderCollapse = 'collapse';
+      table.style.width = '100%';
+      table.style.fontSize = '14pt';
+      table.style.border = '2px solid #444';
+      // Header row
+      const header = document.createElement('tr');
+      const th1 = document.createElement('th'); th1.innerText = 'Activity Type'; th1.style.border = '2px solid #444'; th1.style.padding = '12px'; th1.style.background = '#e0e0e0'; th1.style.fontWeight = 'bold'; th1.style.textAlign = 'center'; header.appendChild(th1);
+      periods.forEach(p => {
+        const th = document.createElement('th'); th.colSpan = 2; th.innerText = `${p}d`; th.style.border = '2px solid #444'; th.style.padding = '12px'; th.style.background = '#e0e0e0'; th.style.fontWeight = 'bold'; th.style.textAlign = 'center'; header.appendChild(th);
+      });
+      table.appendChild(header);
+      // Sub-header for avg/actual
+      const subHeader = document.createElement('tr');
+      const empty = document.createElement('td'); empty.innerText = ''; empty.style.background = '#e0e0e0'; subHeader.appendChild(empty);
+      periods.forEach(() => {
+        const avg = document.createElement('td'); avg.innerText = 'Avg'; avg.style.border = '2px solid #444'; avg.style.padding = '6px'; avg.style.background = '#e0e0e0'; avg.style.fontWeight = 'bold'; avg.style.textAlign = 'center'; subHeader.appendChild(avg);
+        const actual = document.createElement('td'); actual.innerText = 'Actual'; actual.style.border = '2px solid #444'; actual.style.padding = '6px'; actual.style.background = '#e0e0e0'; actual.style.fontWeight = 'bold'; actual.style.textAlign = 'center'; subHeader.appendChild(actual);
+      });
+      table.appendChild(subHeader);
+      // Data rows
+      activityTypesForTable.forEach((activity, rowIndex) => {
+        const row = document.createElement('tr');
+        row.style.background = (rowIndex % 2 === 0) ? '#fff' : '#f7f7f7';
+        const tdName = document.createElement('td'); tdName.innerText = activity; tdName.style.border = '2px solid #444'; tdName.style.padding = '12px'; tdName.style.textAlign = 'center'; row.appendChild(tdName);
+        periods.forEach(period => {
+          // Calculate avg and actual
+          const msPerDay = 24 * 60 * 60 * 1000;
+          if (!lastDate) return; // skip if no data for this company
+          const end = new Date();
+          const start = new Date(end.getTime() - (period - 1) * msPerDay);
+          const periodRows = allRowsForBrand.filter((r: any) => {
+            const d = parseDateString(r['Date']);
+            return d >= start && d <= end;
+          });
+          const actual = periodRows.reduce((acc: number, r: any) => acc + (Number(r[activity]) || 0), 0);
+          const avg = actual / period;
+          const tdAvg = document.createElement('td'); tdAvg.innerText = avg.toFixed(1); tdAvg.style.border = '2px solid #444'; tdAvg.style.padding = '12px'; tdAvg.style.textAlign = 'center'; row.appendChild(tdAvg);
+          const tdActual = document.createElement('td'); tdActual.innerText = actual.toString(); tdActual.style.border = '2px solid #444'; tdActual.style.padding = '12px'; tdActual.style.textAlign = 'center'; row.appendChild(tdActual);
+        });
+        table.appendChild(row);
+      });
+      tableContainer.appendChild(table);
+      // Add legend for trend arrows
+      const legend = document.createElement('div');
+      legend.style.marginTop = '18px';
+      legend.style.fontSize = '13pt';
+      legend.innerHTML = '<b>Legend:</b> <span style="color:green;font-size:18px;font-weight:bold;">↑</span> Up &nbsp; <span style="color:red;font-size:18px;font-weight:bold;">↓</span> Down &nbsp; <span style="color:gray;font-size:18px;font-weight:bold;">→</span> Flat';
+      tableContainer.appendChild(legend);
+      document.body.appendChild(tableContainer);
+      await new Promise(resolve => setTimeout(resolve, 200));
+      const tableCanvas = await html2canvas(tableContainer, { backgroundColor: '#fff', scale: 2 });
+      const tableImg = tableCanvas.toDataURL('image/png');
+      document.body.removeChild(tableContainer);
+      doc.addImage(tableImg, 'PNG', 40, pageY, 500, 350);
+    }
+    doc.save('FrankAI-Analytics-TrendTables.pdf');
+  };
+
   return (
     <Box sx={{ flexGrow: 1, minHeight: '100vh', bgcolor: '#f5f5f5' }}>
       <AppBar position="static">
@@ -657,27 +850,6 @@ function App() {
               Selected file: {fileName}
             </Typography>
           )}
-        </Paper>
-
-        {/* Available Analyses */}
-        <Paper elevation={1} sx={{ p: 2, mb: 4 }}>
-          <Typography variant="h6" gutterBottom>
-            Available Analyses
-          </Typography>
-          <Box>
-            <FormControlLabel
-              control={<input type="checkbox" defaultChecked disabled />}
-              label="Activity Timeline Graph"
-            />
-            <FormControlLabel
-              control={<input type="checkbox" disabled />}
-              label="User Engagement Heatmap (Coming Soon)"
-            />
-            <FormControlLabel
-              control={<input type="checkbox" disabled />}
-              label="Feature Adoption Chart (Coming Soon)"
-            />
-          </Box>
         </Paper>
 
         {/* Data Table Preview */}
@@ -979,6 +1151,7 @@ function App() {
             <Button variant="contained" onClick={handleGenerateReports} disabled={filteredRows.length === 0 || generatingPDF}>
               {generatingPDF ? 'Generating PDF...' : 'Generate Reports'}
             </Button>
+            <Button variant="contained" color="primary" onClick={handleGenerateTrendTablesPDF}>Generate Trend Tables PDF</Button>
             <Button variant="outlined" onClick={() => {
               setEntityFilterType('all');
               setSelectedCompanies([]);
