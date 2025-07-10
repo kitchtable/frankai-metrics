@@ -15,6 +15,7 @@ import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import { Checkbox } from '@mui/material';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+const Plotly = require('plotly.js-dist-min');
 
 // Required columns and their types
 const REQUIRED_COLUMNS = [
@@ -249,6 +250,7 @@ function App() {
   const [fileName, setFileName] = useState<string>('');
   const [showDetails, setShowDetails] = useState<boolean>(false);
   const [snackbarOpen, setSnackbarOpen] = useState(false);
+  const [exportMethod, setExportMethod] = useState<'recharts' | 'plotly'>('recharts');
   const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([null, null]);
   
   // Entity selection state
@@ -429,7 +431,18 @@ function App() {
     return { chartData, companies };
   }
 
-  // Export chart section to PNG
+  // Helper to shorten company names for legend
+  function getShortName(name: string, mode: number) {
+    if (mode === 1) return name;
+    if (mode === 2) return name.length > 23 ? name.slice(0, 23) + '…' : name;
+    if (mode === 3) {
+      const firstWord = name.split(' ')[0];
+      return firstWord.length > 6 ? firstWord.slice(0, 6) + '…' : firstWord;
+    }
+    return name;
+  }
+
+  // Export chart section to PNG (Recharts + html2canvas)
   const handleExport = () => {
     const chartSection = document.getElementById('chart-section-export');
     if (!chartSection) return;
@@ -446,8 +459,163 @@ function App() {
       link.download = `AT_${filterCode}_${start}_${end}_${showAllSeries ? 'AllDataSeries' : selectedSeries.replace(/\s+/g, '')}${runningTotalPart}${allSeriesPart}_${hhmmss}.png`;
       link.href = canvas.toDataURL('image/png');
       link.click();
+      setExportMethod('recharts');
       setSnackbarOpen(true);
     });
+  };
+
+  // Export chart section to PNG (Plotly - for comparison)
+  const handleExportPlotly = async () => {
+    try {
+      // Get chart data
+      const { chartData, companies } = aggregateChartDataSeries(filteredRows, selectedSeries);
+      
+      // Convert data to Plotly format
+      const traces = [];
+      const colors = [
+        '#1976d2', '#388e3c', '#fbc02d', '#d32f2f', '#7b1fa2', '#0288d1', '#c2185b', '#ffa000', '#388e3c', '#303f9f',
+        '#0097a7', '#f57c00', '#512da8', '#00796b', '#c62828', '#0288d1', '#fbc02d', '#388e3c', '#1976d2', '#d32f2f'
+      ];
+
+      // Determine legend columns and name shortening mode
+      let legendCols = 1;
+      let nameMode = 1;
+      if (companies.length > 12) {
+        legendCols = 3;
+        nameMode = 3;
+      } else if (companies.length > 6) {
+        legendCols = 2;
+        nameMode = 2;
+      }
+
+      // Sort companies alphabetically for legend and traces
+      const sortedCompanies = [...companies].sort((a, b) => a.localeCompare(b));
+      // Sort activity types alphabetically for all-series mode
+      const sortedNumericColumns = [...numericColumns].sort((a, b) => a.localeCompare(b));
+
+      // Add traces for each company/series
+      if (showAllSeries && companies.length === 1) {
+        // All activity types for single company, sorted
+        sortedNumericColumns.forEach((col, idx) => {
+          traces.push({
+            x: chartData.map(row => row.Date),
+            y: chartData.map(row => filteredRows.find(r => r['Date'] === row.Date && r['Company'] === companies[0])?.[col] || 0),
+            type: 'scatter',
+            mode: 'lines',
+            name: getShortName(col, nameMode),
+            customdata: col, // full name for tooltip
+            hovertemplate: '%{customdata}<br>Date: %{x}<br>Value: %{y}<extra></extra>',
+            line: { color: colors[idx % colors.length], width: 2 }
+          });
+        });
+      } else {
+        // Companies as separate traces, sorted
+        sortedCompanies.forEach((company, idx) => {
+          traces.push({
+            x: chartData.map(row => row.Date),
+            y: chartData.map(row => row[company] || 0),
+            type: 'scatter',
+            mode: 'lines',
+            name: getShortName(company, nameMode),
+            customdata: company, // full name for tooltip
+            hovertemplate: '%{customdata}<br>Date: %{x}<br>Value: %{y}<extra></extra>',
+            line: { color: colors[idx % colors.length], width: 2 }
+          });
+        });
+      }
+
+      // Add running total if enabled
+      if (showRunningTotal) {
+        const runningTotalData = getAggregateRunningTotalData(chartData, companies);
+        traces.push({
+          x: runningTotalData.map(row => row.Date),
+          y: runningTotalData.map(row => row.RunningTotal),
+          type: 'scatter',
+          mode: 'lines',
+          name: 'Running Total',
+          line: { 
+            color: '#d32f2f', 
+            width: 3,
+            dash: 'dash'
+          }
+        });
+      }
+
+      // Get dynamic title prefix based on entity filter
+      let titlePrefix = 'Company';
+      if (entityFilterType === 'brands') titlePrefix = 'Brand';
+      else if (entityFilterType === 'suppliers') titlePrefix = 'Supplier';
+      else if (entityFilterType === 'all' || entityFilterType === 'specific') titlePrefix = 'Brand & Supplier';
+
+      // Get date range for title
+      let chartTitle = `${titlePrefix} Activity Timeline`;
+      if (chartData.length > 0) {
+        const startDate = chartData[0].Date;
+        const endDate = chartData[chartData.length - 1].Date;
+        chartTitle = `${titlePrefix} Activity Timeline (${startDate} – ${endDate})`;
+      }
+      // Create Plotly layout
+      const layout = {
+        title: { text: chartTitle, font: { size: 14 } },
+        xaxis: {
+          // No title for x-axis
+          tickangle: -45,
+          automargin: true,
+          tickfont: { size: 6 }
+        },
+        yaxis: {
+          title: { text: 'Activity Count', font: { size: 14 } },
+          automargin: true
+        },
+        width: 1000,
+        height: 500,
+        margin: { l: 70, r: 30, t: 70, b: 140 },
+        showlegend: true,
+        legend: { orientation: 'h', x: 0, y: -0.3, font: { size: 12 }, ncol: legendCols },
+        font: { size: 12 },
+        plot_bgcolor: 'white',
+        paper_bgcolor: 'white'
+      };
+
+      // Create temporary div for Plotly
+      const tempDiv = document.createElement('div');
+      tempDiv.style.position = 'fixed';
+      tempDiv.style.left = '-9999px';
+      tempDiv.style.width = '800px';
+      tempDiv.style.height = '400px';
+      document.body.appendChild(tempDiv);
+
+      // Render Plotly chart
+      await Plotly.newPlot(tempDiv, traces, layout);
+
+      // Export to PNG
+      const pngData = await Plotly.toImage(tempDiv, {
+        format: 'png',
+        width: 800,
+        height: 400,
+        scale: 2
+      });
+
+      // Create download link
+      const link = document.createElement('a');
+      const { start, end } = getDateRange(chartData);
+      const now = new Date();
+      const hhmmss = now.toTimeString().slice(0, 8).replace(/:/g, '');
+      const filterCode = getFilterCode();
+      const runningTotalPart = showRunningTotal ? '_RT' : '';
+      const allSeriesPart = showAllSeries ? '_ALLSERIES' : '';
+      link.download = `AT_PLOTLY_${filterCode}_${start}_${end}_${showAllSeries ? 'AllDataSeries' : selectedSeries.replace(/\s+/g, '')}${runningTotalPart}${allSeriesPart}_${hhmmss}.png`;
+      link.href = pngData;
+      link.click();
+
+      // Clean up
+      document.body.removeChild(tempDiv);
+      setExportMethod('plotly');
+      setSnackbarOpen(true);
+    } catch (error) {
+      console.error('Plotly export error:', error);
+      alert('Failed to export with Plotly: ' + error);
+    }
   };
 
   // Helper: Clamp a date to min/max
@@ -725,33 +893,112 @@ function App() {
 
   // Add after the existing PDF export function
   const handleGenerateTrendTablesPDF = async () => {
-    const { companies } = aggregateChartDataSeries(rows, 'Total Activities');
-    let companiesInScope: string[] = [];
-    if (entityFilterType === 'all') {
-      companiesInScope = [...companies];
-    } else if (entityFilterType === 'brands') {
-      companiesInScope = Array.from(new Set(rows.filter(r => r['Role'] === 'Brand').map(r => r['Company'])));
-    } else if (entityFilterType === 'suppliers') {
-      companiesInScope = Array.from(new Set(rows.filter(r => r['Role'] === 'Supplier').map(r => r['Company'])));
-    } else if (entityFilterType === 'specific') {
-      companiesInScope = [...selectedCompanies];
-    }
-    const sortedCompanies = [...companiesInScope].sort((a, b) => a.localeCompare(b));
-    const originalRows = rows.map(row => ({ ...row }));
     const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
-    
-    // Calculate date range for subtitle
+    const originalRows = rows.map(row => ({ ...row }));
+    // Helper to generate and add a Plotly graph to the PDF
+    async function addPlotlyGraphToPDF(companiesInScope: string[], titlePrefix: string, doc: any) {
+      // Prepare chart data for these companies
+      const { chartData, companies } = aggregateChartDataSeries(rows.filter(r => companiesInScope.includes(r.Company)), 'Total Activities');
+      // Sort companies for legend
+      const sortedCompanies = [...companies].sort((a, b) => a.localeCompare(b));
+      // Legend and name shortening logic (reuse from export)
+      let legendCols = 1;
+      let nameMode = 1;
+      if (sortedCompanies.length > 12) {
+        legendCols = 3;
+        nameMode = 3;
+      } else if (sortedCompanies.length > 6) {
+        legendCols = 2;
+        nameMode = 2;
+      }
+      const traces: any[] = [];
+      const colors = [
+        '#1976d2', '#388e3c', '#fbc02d', '#d32f2f', '#7b1fa2', '#0288d1', '#c2185b', '#ffa000', '#388e3c', '#303f9f',
+        '#0097a7', '#f57c00', '#512da8', '#00796b', '#c62828', '#0288d1', '#fbc02d', '#388e3c', '#1976d2', '#d32f2f'
+      ];
+      sortedCompanies.forEach((company, idx) => {
+        traces.push({
+          x: chartData.map(row => row.Date),
+          y: chartData.map(row => row[company] || 0),
+          type: 'scatter',
+          mode: 'lines',
+          name: getShortName(company, nameMode),
+          customdata: company,
+          hovertemplate: '%{customdata}<br>Date: %{x}<br>Value: %{y}<extra></extra>',
+          line: { color: colors[idx % colors.length], width: 2 }
+        });
+      });
+      // Title
+      let chartTitle = `${titlePrefix} Activity Timeline`;
+      if (chartData.length > 0) {
+        const startDate = chartData[0].Date;
+        const endDate = chartData[chartData.length - 1].Date;
+        chartTitle = `${titlePrefix} Activity Timeline (${startDate} – ${endDate})`;
+      }
+      // Layout
+      const layout = {
+        title: { text: chartTitle, font: { size: 14 } },
+        xaxis: {
+          // No title for x-axis
+          tickangle: -45,
+          automargin: true,
+          tickfont: { size: 6 }
+        },
+        yaxis: {
+          title: { text: 'Activity Count', font: { size: 14 } },
+          automargin: true
+        },
+        width: 1000,
+        height: 500,
+        margin: { l: 70, r: 30, t: 70, b: 140 },
+        showlegend: true,
+        legend: { orientation: 'h', x: 0, y: -0.3, font: { size: 12 }, ncol: legendCols },
+        font: { size: 12 },
+        plot_bgcolor: 'white',
+        paper_bgcolor: 'white'
+      };
+      // Create temp div and render Plotly
+      const tempDiv = document.createElement('div');
+      tempDiv.style.position = 'fixed';
+      tempDiv.style.left = '-9999px';
+      tempDiv.style.width = '1000px';
+      tempDiv.style.height = '500px';
+      document.body.appendChild(tempDiv);
+      await Plotly.newPlot(tempDiv, traces, layout);
+      const pngData = await Plotly.toImage(tempDiv, {
+        format: 'png',
+        width: 1000,
+        height: 500,
+        scale: 2
+      });
+      document.body.removeChild(tempDiv);
+      // Add to PDF (full width)
+      doc.addPage();
+      doc.addImage(pngData, 'PNG', 20, 40, 555, 277); // A4 landscape: 595x842pt, leave margin
+    }
+    // Calculate brandsInScope and suppliersInScope before using them
+    const { companies } = aggregateChartDataSeries(rows, 'Total Activities');
+    let brandsInScope: string[] = [];
+    let suppliersInScope: string[] = [];
+    if (entityFilterType === 'all' || entityFilterType === 'specific') {
+      brandsInScope = companies.filter(company => rows.some(row => row['Company'] === company && row['Role'] === 'Brand'));
+      suppliersInScope = companies.filter(company => rows.some(row => row['Company'] === company && row['Role'] === 'Supplier'));
+    } else if (entityFilterType === 'brands') {
+      brandsInScope = companies.filter(company => rows.some(row => row['Company'] === company && row['Role'] === 'Brand'));
+    } else if (entityFilterType === 'suppliers') {
+      suppliersInScope = companies.filter(company => rows.some(row => row['Company'] === company && row['Role'] === 'Supplier'));
+    }
+    // Insert summary graphs before tables
+    if (brandsInScope.length > 0) {
+      await addPlotlyGraphToPDF(brandsInScope, 'Brand', doc);
+    }
+    if (suppliersInScope.length > 0) {
+      await addPlotlyGraphToPDF(suppliersInScope, 'Supplier', doc);
+    }
+    // ... continue with tables as before, using doc ...
     const end = new Date();
     const start = new Date(end.getTime() - (180 - 1) * 24 * 60 * 60 * 1000);
     const dateRangeText = `Activity from ${start.toLocaleDateString()} to ${end.toLocaleDateString()}`;
-    
-    // Separate brands and suppliers
-    const brandsInScope = sortedCompanies.filter(company => 
-      originalRows.some(row => row['Company'] === company && row['Role'] === 'Brand')
-    );
-    const suppliersInScope = sortedCompanies.filter(company => 
-      originalRows.some(row => row['Company'] === company && row['Role'] === 'Supplier')
-    );
     
     // Table periods
     const periods = [7, 14, 30, 90, 180];
@@ -1317,9 +1564,12 @@ function App() {
               FrankAI Analytics Tool
             </div>
           </div>
-          <Box sx={{ textAlign: 'center', mt: 2 }}>
+          <Box sx={{ textAlign: 'center', mt: 2, display: 'flex', gap: 2, justifyContent: 'center' }}>
             <Button variant="contained" onClick={handleExport} disabled={filteredRows.length === 0}>
-              Export to PNG
+              Export to PNG (Recharts)
+            </Button>
+            <Button variant="contained" color="secondary" onClick={handleExportPlotly} disabled={filteredRows.length === 0}>
+              Export to PNG (Plotly)
             </Button>
           </Box>
         </Paper>
@@ -1347,7 +1597,7 @@ function App() {
           open={snackbarOpen}
           autoHideDuration={3000}
           onClose={() => setSnackbarOpen(false)}
-          message="Chart exported as PNG!"
+          message={`Chart exported as PNG using ${exportMethod === 'recharts' ? 'Recharts' : 'Plotly'}!`}
           anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
         />
       </Container>
