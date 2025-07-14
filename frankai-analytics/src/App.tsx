@@ -895,87 +895,7 @@ function App() {
   const handleGenerateTrendTablesPDF = async () => {
     const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
     const originalRows = rows.map(row => ({ ...row }));
-    // Helper to generate and add a Plotly graph to the PDF
-    async function addPlotlyGraphToPDF(companiesInScope: string[], titlePrefix: string, doc: any) {
-      // Prepare chart data for these companies
-      const { chartData, companies } = aggregateChartDataSeries(rows.filter(r => companiesInScope.includes(r.Company)), 'Total Activities');
-      // Sort companies for legend
-      const sortedCompanies = [...companies].sort((a, b) => a.localeCompare(b));
-      // Legend and name shortening logic (reuse from export)
-      let legendCols = 1;
-      let nameMode = 1;
-      if (sortedCompanies.length > 12) {
-        legendCols = 3;
-        nameMode = 3;
-      } else if (sortedCompanies.length > 6) {
-        legendCols = 2;
-        nameMode = 2;
-      }
-      const traces: any[] = [];
-      const colors = [
-        '#1976d2', '#388e3c', '#fbc02d', '#d32f2f', '#7b1fa2', '#0288d1', '#c2185b', '#ffa000', '#388e3c', '#303f9f',
-        '#0097a7', '#f57c00', '#512da8', '#00796b', '#c62828', '#0288d1', '#fbc02d', '#388e3c', '#1976d2', '#d32f2f'
-      ];
-      sortedCompanies.forEach((company, idx) => {
-        traces.push({
-          x: chartData.map(row => row.Date),
-          y: chartData.map(row => row[company] || 0),
-          type: 'scatter',
-          mode: 'lines',
-          name: getShortName(company, nameMode),
-          customdata: company,
-          hovertemplate: '%{customdata}<br>Date: %{x}<br>Value: %{y}<extra></extra>',
-          line: { color: colors[idx % colors.length], width: 2 }
-        });
-      });
-      // Title
-      let chartTitle = `${titlePrefix} Activity Timeline`;
-      if (chartData.length > 0) {
-        const startDate = chartData[0].Date;
-        const endDate = chartData[chartData.length - 1].Date;
-        chartTitle = `${titlePrefix} Activity Timeline (${startDate} – ${endDate})`;
-      }
-      // Layout
-      const layout = {
-        title: { text: chartTitle, font: { size: 14 } },
-        xaxis: {
-          // No title for x-axis
-          tickangle: -45,
-          automargin: true,
-          tickfont: { size: 6 }
-        },
-        yaxis: {
-          title: { text: 'Activity Count', font: { size: 14 } },
-          automargin: true
-        },
-        width: 1000,
-        height: 500,
-        margin: { l: 70, r: 30, t: 70, b: 140 },
-        showlegend: true,
-        legend: { orientation: 'h', x: 0, y: -0.3, font: { size: 12 }, ncol: legendCols },
-        font: { size: 12 },
-        plot_bgcolor: 'white',
-        paper_bgcolor: 'white'
-      };
-      // Create temp div and render Plotly
-      const tempDiv = document.createElement('div');
-      tempDiv.style.position = 'fixed';
-      tempDiv.style.left = '-9999px';
-      tempDiv.style.width = '1000px';
-      tempDiv.style.height = '500px';
-      document.body.appendChild(tempDiv);
-      await Plotly.newPlot(tempDiv, traces, layout);
-      const pngData = await Plotly.toImage(tempDiv, {
-        format: 'png',
-        width: 1000,
-        height: 500,
-        scale: 2
-      });
-      document.body.removeChild(tempDiv);
-      // Add to PDF (full width)
-      doc.addPage();
-      doc.addImage(pngData, 'PNG', 20, 40, 555, 277); // A4 landscape: 595x842pt, leave margin
-    }
+    
     // Calculate brandsInScope and suppliersInScope before using them
     const { companies } = aggregateChartDataSeries(rows, 'Total Activities');
     let brandsInScope: string[] = [];
@@ -987,13 +907,6 @@ function App() {
       brandsInScope = companies.filter(company => rows.some(row => row['Company'] === company && row['Role'] === 'Brand'));
     } else if (entityFilterType === 'suppliers') {
       suppliersInScope = companies.filter(company => rows.some(row => row['Company'] === company && row['Role'] === 'Supplier'));
-    }
-    // Insert summary graphs before tables
-    if (brandsInScope.length > 0) {
-      await addPlotlyGraphToPDF(brandsInScope, 'Brand', doc);
-    }
-    if (suppliersInScope.length > 0) {
-      await addPlotlyGraphToPDF(suppliersInScope, 'Supplier', doc);
     }
     // ... continue with tables as before, using doc ...
     const end = new Date();
@@ -1110,7 +1023,9 @@ function App() {
       doc.text(dateRangeText, 40, pageY);
       pageY += 20;
       
-      createSummaryTable(brandsInScope, 'Brands', pageY);
+      // Sort brands alphabetically
+      const sortedBrands = [...brandsInScope].sort((a, b) => a.localeCompare(b));
+      createSummaryTable(sortedBrands, 'Brands', pageY);
     }
     
     // Page 2: Supplier summary table (if suppliers exist)
@@ -1124,7 +1039,9 @@ function App() {
       doc.text(dateRangeText, 40, pageY);
       pageY += 20;
       
-      createSummaryTable(suppliersInScope, 'Suppliers', pageY);
+      // Sort suppliers alphabetically
+      const sortedSuppliers = [...suppliersInScope].sort((a, b) => a.localeCompare(b));
+      createSummaryTable(sortedSuppliers, 'Suppliers', pageY);
     }
     
     // Individual company pages - brands first, then suppliers
